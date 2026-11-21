@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}登记新表版 · 设备巡检记录{% endblock %}
+{% block content %}
+<h1>登记新表版</h1>
+<p class="subtitle">表版保存后不可修改；请一次把检查项和显示条件填好。</p>
+
+{% if error %}
+<div class="flash error">{{ error }}</div>
+{% endif %}
+{% if errors %}
+<div class="panel" style="border-color:#f3c2bd;">
+  <ul class="error-list">
+    {% for message in errors %}<li>{{ message }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<form method="post" action="{{ url_for('create_version') }}" class="panel">
+  <label class="field">
+    <span class="label-text">表版名称</span>
+    <input type="text" name="name" maxlength="100" value="{{ name or '' }}" required>
+  </label>
+
+  <label class="field">
+    <span class="label-text">备注 <span class="help">（可选，例如机台或日期范围）</span></span>
+    <input type="text" name="source" maxlength="200" value="{{ source or '' }}">
+  </label>
+
+  <label class="field">
+    <span class="label-text">检查项与条件 <span class="help">每行一项，最多 12 项</span></span>
+    <textarea class="mono" name="definition" spellcheck="false" required
+      placeholder="冷却泵已安装&#10;备用泵外观检查 | 1=是&#10;备用泵压力检查 | 1=是 &amp; 2=否 ; 3=是">{{ definition_text or '' }}</textarea>
+  </label>
+
+  <div class="hintbox">
+    <strong>写法：</strong><br>
+    · 只写名称的项<strong>始终显示</strong>。<br>
+    · <code>名称 | 条件</code> 指定显示条件；条件用<code>1=是</code>引用前面的检查项（从 1 开始数）。<br>
+    · <code>&amp;</code> 表示同一组内全部满足，<code>;</code> 分隔多组，任一组满足即显示。<br>
+    · 未安装冷却泵的机台无需检查备用泵：先设“冷却泵已安装”，再给备用泵各项写 <code>1=是</code>。<br>
+    · 空的显示项会按补答“是”和“否”两种可能判定，可能显示也可能不显示的项记为<strong>待核</strong>。
+  </div>
+
+  <button class="btn" type="submit">保存表版</button>
+</form>
+{% endblock %}

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}按记录号查看 · {{ version.name }}{% endblock %}
+{% block content %}
+<p class="small"><a href="{{ url_for('version_detail', version_id=version.id) }}">← 返回 {{ version.name }}</a></p>
+<h1>按记录号查看</h1>
+<p class="subtitle">{{ version.name }}</p>
+
+<div class="panel">
+  <form method="get" action="{{ url_for('record_lookup', version_id=version.id) }}"
+        class="lookup-form">
+    <label class="field">
+      <span class="label-text">记录号</span>
+      <input type="text" name="record_no" required autofocus
+             value="{{ record_no or '' }}" placeholder="输入记录号后回车">
+    </label>
+    <button class="btn" type="submit">查看判定</button>
+  </form>
+</div>
+{% endblock %}

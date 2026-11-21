@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}{{ version.name }} · 设备巡检记录{% endblock %}
+{% block content %}
+<p class="small"><a href="{{ url_for('index') }}">← 返回表版列表</a></p>
+<h1>{{ version.name }}</h1>
+<p class="subtitle">
+  {% if version.source %}{{ version.source }} · {% endif %}
+  创建于 {{ version.created_at }} · 共 {{ version.record_count }} 条记录
+</p>
+
+<div class="panel">
+  <h2 style="margin-top:0;">巡检记录</h2>
+  {% if version.record_count == 0 %}
+  <form method="post" action="{{ url_for('import_csv', version_id=version.id) }}"
+        enctype="multipart/form-data" class="actions">
+    <input type="file" name="csv" accept=".csv,text/csv" required
+           style="border:1px solid var(--line); border-radius:8px; padding:7px 10px; background:#fff;">
+    <button class="btn" type="submit">上传 CSV</button>
+  </form>
+  <p class="muted small" style="margin-bottom:0;">
+    表头需包含“记录号”和本版全部检查项名称；每格填是、否或留空。最多 50,000 条记录。
+  </p>
+  {% else %}
+  <div class="actions">
+    <a class="btn secondary" href="{{ url_for('record_lookup', version_id=version.id) }}">按记录号查看</a>
+    <span class="muted small">记录已导入，不可重复导入。</span>
+  </div>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h2 style="margin-top:0;">各项判定计数</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>检查项</th>
+        <th>显示条件</th>
+        <th class="num">已答</th>
+        <th class="num">漏填</th>
+        <th class="num">免检</th>
+        <th class="num">待核</th>
+        <th class="num">合计</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td class="num">{{ item.number }}</td>
+        <td>{{ item.name }}</td>
+        <td class="muted small">{{ item.condition }}</td>
+        <td class="num count-answered">{{ item.counts.answered }}</td>
+        <td class="num count-missing">{{ item.counts.missing }}</td>
+        <td class="num count-exempt">{{ item.counts.exempt }}</td>
+        <td class="num count-pending">{{ item.counts.pending }}</td>
+        <td class="num">{{ item.total }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="legend">
+    <span><strong>已答</strong>：始终显示且原答案填了是/否</span>
+    <span><strong>漏填</strong>：始终显示但原答案留空</span>
+    <span><strong>免检</strong>：所有补答情形下都不显示</span>
+    <span><strong>待核</strong>：是否显示取决于留空项，需要回头核实</span>
+  </div>
+</div>
+{% endblock %}

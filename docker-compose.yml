@@ -1,0 +1,14 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - inspection-data:/data
+    environment:
+      DATABASE: /data/inspection.db
+      SECRET_KEY: change-me-in-production
+    restart: unless-stopped
+
+volumes:
+  inspection-data:

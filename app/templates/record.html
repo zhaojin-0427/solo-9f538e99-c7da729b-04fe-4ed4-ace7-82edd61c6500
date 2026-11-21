@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}查看记录 · {{ version.name }}{% endblock %}
+{% block content %}
+<p class="small"><a href="{{ url_for('version_detail', version_id=version.id) }}">← 返回 {{ version.name }}</a></p>
+<h1>记录 {{ record.record_no }}</h1>
+<p class="subtitle">{{ version.name }}</p>
+
+<div class="panel">
+  <form method="get" action="{{ url_for('record_lookup', version_id=version.id) }}" class="lookup-form">
+    <label class="field">
+      <span class="label-text">记录号</span>
+      <input type="text" name="record_no" value="{{ record.record_no }}" required>
+    </label>
+    <button class="btn secondary" type="submit">查看</button>
+  </form>
+</div>
+
+{% if corrected %}
+<div class="flash success">更正已保存，判定与计数已按新答案更新。</div>
+{% endif %}
+
+<div class="panel">
+  <div class="record-meta">
+    <span>记录号 <strong class="mono">{{ record.record_no }}</strong></span>
+    <span>最近更新 <strong>{{ record.updated_at }}</strong></span>
+  </div>
+</div>
+
+<div class="panel">
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>检查项</th>
+        <th>显示条件</th>
+        <th>答案</th>
+        <th>判定</th>
+        <th>更正</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td class="num">{{ row.number }}</td>
+        <td>{{ row.name }}</td>
+        <td class="muted small">{{ row.condition }}</td>
+        <td class="answer-cell">
+          {% if row.answer %}<span class="current">{{ row.answer }}</span>{% else %}<span class="blank">（留空）</span>{% endif %}
+        </td>
+        <td><span class="badge {{ row.category }}">{{ row.category_label }}</span></td>
+        <td>
+          <form method="post"
+                action="{{ url_for('correct', version_id=version.id, record_no=record.record_no) }}"
+                class="inline-form">
+            <input type="hidden" name="item_index" value="{{ row.index }}">
+            <select name="value" aria-label="更正第 {{ row.number }} 项">
+              <option value="是" {% if row.answer == '是' %}selected{% endif %}>是</option>
+              <option value="否" {% if row.answer == '否' %}selected{% endif %}>否</option>
+              <option value="" {% if not row.answer %}selected{% endif %}>留空</option>
+            </select>
+            <button class="btn tiny" type="submit">保存</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="legend">
+    <span class="badge answered">已答</span>
+    <span class="badge missing">漏填</span>
+    <span class="badge exempt">免检</span>
+    <span class="badge pending">待核</span>
+    <span>更正只重判这一条记录，并同步更新该表版计数。</span>
+  </div>
+</div>
+
+<div class="panel">
+  <h2 style="margin-top:0;">本表版当前计数</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>检查项</th>
+        <th class="num">已答</th>
+        <th class="num">漏填</th>
+        <th class="num">免检</th>
+        <th class="num">待核</th>
+        <th class="num">合计</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in count_rows %}
+      <tr>
+        <td class="num">{{ row.number }}</td>
+        <td>{{ row.name }}</td>
+        <td class="num count-answered">{{ row.counts.answered }}</td>
+        <td class="num count-missing">{{ row.counts.missing }}</td>
+        <td class="num count-exempt">{{ row.counts.exempt }}</td>
+        <td class="num count-pending">{{ row.counts.pending }}</td>
+        <td class="num">{{ row.total }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

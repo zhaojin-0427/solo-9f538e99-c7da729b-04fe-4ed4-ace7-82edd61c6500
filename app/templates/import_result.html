@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}导入结果 · {{ version.name }}{% endblock %}
+{% block content %}
+<p class="small"><a href="{{ url_for('version_detail', version_id=version.id) }}">← 返回 {{ version.name }}</a></p>
+<h1>CSV 未导入</h1>
+<p class="subtitle">整份文件校验未通过时不会写入任何记录。</p>
+
+<div class="panel">
+  <div class="flash error">{{ error }}</div>
+  {% if errors %}
+  <ul class="error-list">
+    {% for message in errors %}<li>{{ message }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+</div>
+
+<p><a class="btn secondary" href="{{ url_for('version_detail', version_id=version.id) }}">返回重试</a></p>
+{% endblock %}

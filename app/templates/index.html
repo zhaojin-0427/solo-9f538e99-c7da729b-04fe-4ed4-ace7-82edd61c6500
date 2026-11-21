@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}表版列表 · 设备巡检记录{% endblock %}
+{% block content %}
+<h1>表版列表</h1>
+<p class="subtitle">每个表版创建后不可修改；巡检记录逐行判定已答、漏填、免检、待核四类状态。</p>
+
+<div class="actions" style="margin-bottom: 20px;">
+  <a class="btn" href="{{ url_for('new_version') }}">登记新表版</a>
+</div>
+
+<div class="panel">
+  {% if versions %}
+  <table class="version-list">
+    <thead>
+      <tr>
+        <th>表版</th>
+        <th>记录数</th>
+        <th>创建时间</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for version in versions %}
+      <tr>
+        <td class="name">{{ version.name }}</td>
+        <td class="num">{{ version.record_count }}</td>
+        <td class="muted small">{{ version.created_at }}</td>
+        <td><a class="btn tiny secondary" href="{{ url_for('version_detail', version_id=version.id) }}">查看</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">还没有表版。点“登记新表版”开始。</p>
+  {% endif %}
+</div>
+{% endblock %}
