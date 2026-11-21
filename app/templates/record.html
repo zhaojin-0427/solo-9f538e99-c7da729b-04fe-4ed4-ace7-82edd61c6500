@@ -15,8 +15,8 @@
   </form>
 </div>
 
-{% if corrected %}
-<div class="flash success">更正已保存，判定与计数已按新答案更新。</div>
+{% if feedback %}
+<div class="flash {{ feedback.kind }}">{{ feedback.message }}</div>
 {% endif %}
 
 <div class="panel">

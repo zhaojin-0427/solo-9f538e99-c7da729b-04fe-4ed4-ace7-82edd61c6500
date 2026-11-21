@@ -175,19 +175,33 @@ def create_app(config: dict | None = None) -> Flask:
             "lookup.html", version=version, record_no=record_no
         )
 
-    @app.get("/versions/<int:version_id>/records/<path:record_no>")
-    def record_detail(version_id: int, record_no: str):
-        version = db.get_version(version_id)
-        if version is None:
-            abort(404)
-        record = db.get_record(version_id, record_no)
-        if record is None:
-            abort(404)
+    def _render_record_page(
+        version: dict,
+        record: dict,
+        result: dict | None = None,
+    ) -> str:
+        """Render the record page.
 
+        When ``result`` is a one-shot correction snapshot it overrides the
+        stored answers/categories/counts so the page reflects that exact
+        submission; otherwise the latest committed data is shown.
+        """
         definition = version["definition"]
-        answers = record["answers"]
-        if len(answers) < len(definition["items"]):
-            answers = answers + [""] * (len(definition["items"]) - len(answers))
+        item_count = len(definition["items"])
+
+        if result is not None and result["kind"] == "success":
+            answers = list(result["answers"])
+            categories = list(result["categories"])
+            updated_at = result["updated_at"]
+            counts = result["counts"]
+        else:
+            answers = list(record["answers"])
+            categories = list(record["categories"])
+            updated_at = record["updated_at"]
+            counts = db.get_counts(version["id"], item_count)
+
+        if len(answers) < item_count:
+            answers = answers + [""] * (item_count - len(answers))
 
         rows = []
         for index, item in enumerate(definition["items"]):
@@ -197,13 +211,12 @@ def create_app(config: dict | None = None) -> Flask:
                     "number": index + 1,
                     "name": item["name"],
                     "answer": answers[index],
-                    "category": record["categories"][index],
-                    "category_label": CATEGORY_LABELS[record["categories"][index]],
+                    "category": categories[index],
+                    "category_label": CATEGORY_LABELS[categories[index]],
                     "condition": describe_item(definition, index),
                 }
             )
 
-        counts = db.get_counts(version_id, len(definition["items"]))
         count_rows = [
             {
                 "number": index + 1,
@@ -211,62 +224,148 @@ def create_app(config: dict | None = None) -> Flask:
                 "counts": counts[index],
                 "total": sum(counts[index].values()),
             }
-            for index in range(len(definition["items"]))
+            for index in range(item_count)
         ]
+
+        feedback = None
+        if result is not None:
+            if result["kind"] == "success":
+                feedback = {
+                    "kind": "success",
+                    "message": "更正已保存，判定与计数已按新答案更新。",
+                }
+            else:
+                feedback = {
+                    "kind": "error",
+                    "message": result["message"],
+                }
+
+        display_record = dict(record)
+        display_record["answers"] = answers
+        display_record["categories"] = categories
+        display_record["updated_at"] = updated_at
 
         return render_template(
             "record.html",
             version=version,
-            record=record,
+            record=display_record,
             rows=rows,
             count_rows=count_rows,
             categories=CATEGORIES,
             labels=CATEGORY_LABELS,
-            corrected=request.args.get("corrected") == "1",
+            feedback=feedback,
         )
+
+    @app.get("/versions/<int:version_id>/records/<path:record_no>")
+    def record_detail(version_id: int, record_no: str):
+        version = db.get_version(version_id)
+        if version is None:
+            abort(404)
+        record = db.get_record(version_id, record_no)
+        if record is None:
+            abort(404)
+
+        # A one-shot token carries the feedback of exactly one submission.
+        # It is consumed here, so refreshing (or another tab) simply shows
+        # the latest committed data without any banner.
+        result = None
+        token = (request.args.get("result") or "").strip()
+        if token:
+            result = db.consume_correction_result(
+                token, version_id, record_no
+            )
+
+        return _render_record_page(version, record, result)
 
     @app.post("/versions/<int:version_id>/records/<path:record_no>/correct")
     def correct(version_id: int, record_no: str):
         version = db.get_version(version_id)
         if version is None:
             abort(404)
-        if db.get_record(version_id, record_no) is None:
+        record = db.get_record(version_id, record_no)
+        if record is None:
             abort(404)
 
         item_raw = request.form.get("item_index", "")
         value = request.form.get("value", "")
         if not item_raw.isdigit():
-            flash("更正失败：检查项无效。", "error")
-            return redirect(
-                url_for(
-                    "record_detail", version_id=version_id, record_no=record_no
-                )
+            return _correction_feedback_redirect(
+                version,
+                record,
+                "error",
+                {"message": "更正失败：检查项无效。"},
             )
 
         try:
-            db.correct_answer(version_id, record_no, int(item_raw), value)
+            snapshot = db.correct_answer(
+                version_id, record_no, int(item_raw), value
+            )
         except db.DataError as exc:
-            flash(f"更正失败：{exc}", "error")
-            return redirect(
-                url_for(
-                    "record_detail", version_id=version_id, record_no=record_no
-                )
+            return _correction_feedback_redirect(
+                version,
+                record,
+                "error",
+                {"message": f"更正失败：{exc}"},
             )
         except Exception:
             app.logger.exception("correct_answer failed")
-            flash("更正失败，答案、判定和计数均未改变，请稍后重试。", "error")
-            return redirect(
-                url_for(
-                    "record_detail", version_id=version_id, record_no=record_no
-                )
+            return _correction_feedback_redirect(
+                version,
+                record,
+                "error",
+                {"message": "更正失败，答案、判定和计数均未改变，请稍后重试。"},
             )
 
+        # Read the whole-version counts inside the same request right after
+        # the committed transaction: they are the counts this submission
+        # produced.  The snapshot travels with the one-shot token, so another
+        # tab committing later cannot overwrite what this tab displays.
+        counts = db.get_counts(version_id, len(version["definition"]["items"]))
+        payload = {
+            "answers": snapshot["answers"],
+            "categories": snapshot["categories"],
+            "updated_at": snapshot["updated_at"],
+            "counts": counts,
+        }
+        return _correction_feedback_redirect(
+            version, record, "success", payload
+        )
+
+    def _correction_feedback_redirect(
+        version: dict, record: dict, kind: str, payload: dict
+    ):
+        """Persist one tab's one-shot feedback, then redirect to its page.
+
+        The token lives in the shared database (not in the session cookie), so
+        the message can never surface in another tab.  If persisting the
+        feedback itself fails, render the page directly: error feedback stays
+        in the requesting tab and committed data is never affected.
+        """
+        version_id = version["id"]
+        record_no = record["record_no"]
+        try:
+            token = db.save_correction_result(
+                version_id, record_no, kind, payload
+            )
+        except Exception:
+            app.logger.exception("save_correction_result failed")
+            if kind == "error":
+                fallback = dict(payload)
+                fallback["kind"] = "error"
+                return _render_record_page(version, record, fallback), 500
+            # The correction itself committed; the data is correct, only the
+            # one-shot banner could not be stored.
+            fallback = {
+                "kind": "error",
+                "message": "更正已保存，但反馈信息保存失败，请刷新页面查看最新数据。",
+            }
+            return _render_record_page(version, record, fallback), 500
         return redirect(
             url_for(
                 "record_detail",
                 version_id=version_id,
                 record_no=record_no,
-                corrected=1,
+                result=token,
             )
         )
 

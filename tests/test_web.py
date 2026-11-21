@@ -1,4 +1,5 @@
 import io
+import re
 
 import pytest
 
@@ -236,7 +237,11 @@ def test_failed_correction_survives_restart(tmp_path):
                 f"/versions/{version_id}/records/R1/correct",
                 data={"item_index": "0", "value": "否"},
             )
-            assert response.status_code == 302
+            # The correction itself rolled back.  Persisting the one-shot
+            # feedback token fails under the same stub, so the page is
+            # rendered directly in the requesting tab.
+            assert response.status_code == 500
+            assert "更正失败" in response.get_data(as_text=True)
     finally:
         db._commit = original
 
@@ -344,3 +349,230 @@ def test_missing_record_column_rejected(client):
     response = upload(client, version_id, bad)
     assert response.status_code == 400
     assert "缺少“记录号”列" in response.get_data(as_text=True)
+
+
+# ---------------------------------------------------------------------------
+# Multi-tab correction feedback
+
+
+def _first_answer_badge(page: str) -> str:
+    """Badge text of item 1 inside the answers table."""
+    match = re.search(
+        r'badge (answered|missing|exempt|pending)">([^<]+)</span>', page
+    )
+    assert match is not None
+    return match.group(2)
+
+
+def _counts_row_one(page: str) -> list[int]:
+    """The four category counts of item 1 in the counts table."""
+    match = re.search(
+        r'count-answered">(\d+)</td>\s*'
+        r'<td class="num count-missing">(\d+)</td>\s*'
+        r'<td class="num count-exempt">(\d+)</td>\s*'
+        r'<td class="num count-pending">(\d+)</td>',
+        page,
+    )
+    assert match is not None
+    return [int(value) for value in match.groups()]
+
+
+def _post_correction(client, version_id, record_no, item_index, value):
+    response = client.post(
+        f"/versions/{version_id}/records/{record_no}/correct",
+        data={"item_index": str(item_index), "value": value},
+    )
+    assert response.status_code == 302
+    return response.headers["Location"]
+
+
+def test_interleaved_corrections_keep_own_results(client):
+    """Two tabs (separate clients, shared browser cookie jar is irrelevant
+    here because feedback no longer uses the session): tab A commits first,
+    tab B commits before A opens its result page.  Each result page must show
+    that tab's own answers, judgment and whole-version counts.
+    """
+    version_id = make_version(client)
+    upload(client, version_id, csv_bytes([("R1", "", "", "", "")]))
+
+    tab_a = client.application.test_client()
+    tab_b = client.application.test_client()
+
+    # Tab A: blank -> 否.  After this, item 1 is answered(否) and the
+    # dependent items are exempt.
+    location_a = _post_correction(tab_a, version_id, "R1", 0, "否")
+    # Tab B: blank -> 是, committed before tab A loads its result page.
+    location_b = _post_correction(tab_b, version_id, "R1", 0, "是")
+    assert location_a != location_b
+
+    page_a = tab_a.get(location_a).get_data(as_text=True)
+    page_b = tab_b.get(location_b).get_data(as_text=True)
+
+    # Tab A still sees its own submission: answer 否, item 1 已答,
+    # dependent items 免检, and the counts as they were right after commit A
+    # (1 answered, 0 missing/exempt/pending for item 1).
+    assert "更正已保存" in page_a
+    assert _first_answer_badge(page_a) == "已答"
+    assert 'class="current">否</span>' in page_a
+    assert 'class="current">是</span>' not in page_a
+    assert page_a.count("badge exempt") >= 2
+    assert _counts_row_one(page_a) == [1, 0, 0, 0]
+
+    # Tab B sees its own later submission: answer 是, item 1 已答,
+    # dependent items show again (待核/漏填), still 1 answered overall.
+    assert "更正已保存" in page_b
+    assert _first_answer_badge(page_b) == "已答"
+    assert 'class="current">是</span>' in page_b
+    assert 'class="current">否</span>' not in page_b
+    assert _counts_row_one(page_b) == [1, 0, 0, 0]
+    assert "待核" in page_b
+
+    # The database holds the latest committed write (tab B).
+    with client.application.app_context():
+        record = db.get_record(version_id, "R1")
+    assert record["answers"][0] == "是"
+
+
+def test_refresh_shows_latest_committed_data_without_banner(client):
+    version_id = make_version(client)
+    upload(client, version_id, csv_bytes([("R1", "", "", "", "")]))
+
+    tab_a = client.application.test_client()
+    tab_b = client.application.test_client()
+    location_a = _post_correction(tab_a, version_id, "R1", 0, "否")
+    _post_correction(tab_b, version_id, "R1", 0, "是")
+
+    # First open consumes tab A's one-shot snapshot (its own 否 result).
+    first = tab_a.get(location_a).get_data(as_text=True)
+    assert 'class="current">否</span>' in first
+    assert "更正已保存" in first
+
+    # Refresh (same URL, token now consumed): latest committed data only,
+    # no feedback banner.
+    refreshed = tab_a.get(location_a).get_data(as_text=True)
+    assert 'class="current">是</span>' in refreshed
+    assert "更正已保存" not in refreshed
+    assert "更正失败" not in refreshed
+
+    # A plain reload without the token shows the latest data as well.
+    plain = tab_a.get(
+        f"/versions/{version_id}/records/R1"
+    ).get_data(as_text=True)
+    assert 'class="current">是</span>' in plain
+    assert "更正已保存" not in plain
+
+
+def test_failed_correction_message_stays_in_own_tab(client, monkeypatch):
+    version_id = make_version(client)
+    upload(client, version_id, csv_bytes([("R1", "是", "是", "是", "是")]))
+    with client.application.app_context():
+        before_record = db.get_record(version_id, "R1")
+        before_counts = db.get_counts(version_id, 4)
+
+    tab_a = client.application.test_client()
+    tab_b = client.application.test_client()
+
+    # Tab A's write fails after the statements but before COMMIT.
+    def boom(_connection):
+        raise RuntimeError("simulated disk failure")
+
+    monkeypatch.setattr(db, "_commit", boom)
+    failed_response = tab_a.post(
+        f"/versions/{version_id}/records/R1/correct",
+        data={"item_index": "0", "value": "否"},
+    )
+    monkeypatch.undo()
+
+    # With every COMMIT failing the one-shot token cannot be persisted either,
+    # so the error page is rendered directly inside the requesting tab.
+    assert failed_response.status_code == 500
+    page_a = failed_response.get_data(as_text=True)
+    assert "更正失败" in page_a
+    assert "答案、判定和计数均未改变" in page_a
+
+    # Tab B commits a valid correction in the meantime.
+    location_b = _post_correction(tab_b, version_id, "R1", 0, "否")
+
+    page_b = tab_b.get(location_b).get_data(as_text=True)
+
+    # The failure banner never reached another tab...
+    assert "更正失败" not in page_b
+    assert "更正已保存" in page_b
+
+    # ...and tab A's page keeps the previously committed answer; its failed
+    # attempt did not change anything.
+    assert 'class="current">是</span>' in page_a
+    assert 'class="current">否</span>' not in page_a
+
+    # A later plain reload of tab A shows the latest committed data, no error.
+    reloaded = tab_a.get(
+        f"/versions/{version_id}/records/R1"
+    ).get_data(as_text=True)
+    assert "更正失败" not in reloaded
+    assert "更正已保存" not in reloaded
+    assert 'class="current">否</span>' in reloaded
+
+    with client.application.app_context():
+        after_record = db.get_record(version_id, "R1")
+        after_counts = db.get_counts(version_id, 4)
+    # Only tab B's successful write is reflected in the database.
+    assert after_record["answers"][0] == "否"
+    assert after_counts[0]["answered"] == before_counts[0]["answered"]
+
+
+def test_invalid_correction_feedback_is_one_shot_and_tab_scoped(client):
+    version_id = make_version(client)
+    upload(client, version_id, csv_bytes([("R1", "是", "是", "是", "是")]))
+
+    tab_a = client.application.test_client()
+    response = tab_a.post(
+        f"/versions/{version_id}/records/R1/correct",
+        data={"item_index": "0", "value": "也许"},
+    )
+    location = response.headers["Location"]
+    page = tab_a.get(location).get_data(as_text=True)
+    assert "更正失败" in page
+
+    # One-shot: refresh drops the banner and shows the committed answer.
+    refreshed = tab_a.get(location).get_data(as_text=True)
+    assert "更正失败" not in refreshed
+    assert 'class="current">是</span>' in refreshed
+
+    # The token is scoped to its own record.
+    other = tab_a.get(
+        f"/versions/{version_id}/records/R1?result={location.split('result=')[1]}"
+    ).get_data(as_text=True)
+    assert "更正失败" not in other
+
+
+def test_result_tokens_are_stored_in_shared_database(client):
+    version_id = make_version(client)
+    upload(client, version_id, csv_bytes([("R1", "", "", "", "")]))
+    response = client.post(
+        f"/versions/{version_id}/records/R1/correct",
+        data={"item_index": "0", "value": "否"},
+    )
+    token = response.headers["Location"].split("result=")[1]
+    with client.application.app_context():
+        connection = db.get_db()
+        row = connection.execute(
+            "SELECT version_id, record_no, kind FROM correction_results"
+            " WHERE token = ?",
+            (token,),
+        ).fetchone()
+        assert row is not None
+        assert row["version_id"] == version_id
+        assert row["record_no"] == "R1"
+        assert row["kind"] == "success"
+        # Consuming deletes the row.
+        consumed = db.consume_correction_result(token, version_id, "R1")
+        assert consumed is not None and consumed["kind"] == "success"
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM correction_results WHERE token = ?",
+                (token,),
+            ).fetchone()[0]
+            == 0
+        )
+        # A second consume finds nothing.
+        assert db.consume_correction_result(token, version_id, "R1") is None

@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import current_app, g
@@ -59,7 +60,22 @@ BEFORE DELETE ON versions
 BEGIN
     SELECT RAISE(ABORT, 'versions are immutable');
 END;
+
+-- One-shot per-submission feedback for the correction page.  Each token holds
+-- the snapshot of exactly one POST (success or failure) so that a tab always
+-- sees the result of its own submission even when another tab commits in
+-- between.  Tokens are consumed once and pruned when they expire.
+CREATE TABLE IF NOT EXISTS correction_results (
+    token TEXT PRIMARY KEY,
+    version_id INTEGER NOT NULL,
+    record_no TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
 """
+
+RESULT_TTL = timedelta(hours=1)
 
 CATEGORY_COLUMNS = {
     "answered": "answered",
@@ -301,11 +317,12 @@ def get_record(version_id: int, record_no: str) -> dict | None:
 
 def correct_answer(
     version_id: int, record_no: str, item_index: int, value: str
-) -> list[str]:
+) -> dict:
     """Change one answer, then re-judge only that record and update counts.
 
-    Returns the new categories.  The record update and the count update share
-    one transaction; on failure the exception propagates and nothing changes.
+    Returns a snapshot of the committed state (new answers, categories and
+    update time).  The record update and the count update share one
+    transaction; on failure the exception propagates and nothing changes.
     """
     connection = get_db()
     try:
@@ -343,6 +360,7 @@ def correct_answer(
             if answer in ("是", "否")
         }
         new_categories = judge(definition, answer_map)
+        updated_at = utcnow()
 
         connection.execute(
             "UPDATE records SET answers = ?, categories = ?, updated_at = ?"
@@ -350,7 +368,7 @@ def correct_answer(
             (
                 _serialise_answers(answers),
                 _serialise_categories(new_categories),
-                utcnow(),
+                updated_at,
                 version_id,
                 record_no,
             ),
@@ -368,8 +386,88 @@ def correct_answer(
             )
 
         _commit(connection)
-        return new_categories
+        return {
+            "answers": answers,
+            "categories": new_categories,
+            "updated_at": updated_at,
+        }
     except Exception:
         if _in_transaction(connection):
             connection.execute("ROLLBACK")
         raise
+
+
+# ---------------------------------------------------------------------------
+# One-shot correction feedback (shared across worker processes via SQLite)
+
+
+def save_correction_result(
+    version_id: int, record_no: str, kind: str, payload: dict
+) -> str:
+    """Store a one-time feedback snapshot and return its opaque token."""
+    connection = get_db()
+    token = secrets.token_urlsafe(24)
+    now = datetime.now(timezone.utc)
+    expires_at = (now + RESULT_TTL).isoformat(timespec="seconds")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "DELETE FROM correction_results WHERE expires_at <= ?",
+            (now.isoformat(timespec="seconds"),),
+        )
+        connection.execute(
+            "INSERT INTO correction_results"
+            " (token, version_id, record_no, kind, payload, expires_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                token,
+                version_id,
+                record_no,
+                kind,
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                expires_at,
+            ),
+        )
+        _commit(connection)
+    except Exception:
+        if _in_transaction(connection):
+            connection.execute("ROLLBACK")
+        raise
+    return token
+
+
+def consume_correction_result(
+    token: str, version_id: int, record_no: str
+) -> dict | None:
+    """Return and delete a one-time feedback snapshot, scoped to this record.
+
+    A token can only be consumed once; reloading the page (or opening it in
+    another tab) therefore shows the latest committed data without a banner.
+    """
+    connection = get_db()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT kind, payload, expires_at FROM correction_results"
+            " WHERE token = ? AND version_id = ? AND record_no = ?",
+            (token, version_id, record_no),
+        ).fetchone()
+        if row is None:
+            connection.execute("COMMIT")
+            return None
+        connection.execute(
+            "DELETE FROM correction_results WHERE token = ?", (token,)
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        if _in_transaction(connection):
+            connection.execute("ROLLBACK")
+        raise
+
+    if row["expires_at"] <= datetime.now(timezone.utc).isoformat(
+        timespec="seconds"
+    ):
+        return None
+    result = json.loads(row["payload"])
+    result["kind"] = row["kind"]
+    return result
